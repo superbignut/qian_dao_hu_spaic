@@ -1,0 +1,6 @@
+/log
+/save
+weight*
+/weight*
+*.pth
+*.csv
