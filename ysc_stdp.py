@@ -4,6 +4,25 @@
     真正能用到的其实就是，特征提取到的结果，然后用结果来作为spaic的输入才行
 
     然后的话，打算把情感模型的输出放大为3，分别是，积极，消极，愤怒 三个，对应的动作是 亲近，远离，汪汪叫
+
+
+            根据1维的数据，返回应有的标签 
+            # 0   1   2   3   |    4   5   6   7     |    8   9   10   11    |    12    13     14    15    训练优先级递增
+            # 无  红  蓝  暗   |   无   酒  酒  酒    |    无  摸   摸   踢     |    无   积极   批评   侮辱 
+            # 
+            # 返回 0 1 2 3   代表 NULL, 积极, 消极, 愤怒
+
+            侮辱：
+                15 11
+
+            消极：
+                14 7 6 5 3 1
+
+            积极：
+                2 9 10 13
+
+            NULL:
+                0 4 8 12
 """
 import collections
 import numpy as np
@@ -67,7 +86,7 @@ def ysc_create_data_before_pretrain_new_new():
     data = []
     groups = {
         'ANGRY': [15, 11],
-        'NEGATIVE': [14, 10, 7, 6, 5, 3, 1], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
+        'NEGATIVE': [14, 7, 6, 5, 3, 1], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
         'POSITIVE': [2, 9, 10, 13],
         'NULL': [0, 4, 8, 12]
         }
@@ -90,7 +109,7 @@ def ysc_create_data_after_pretrain_new_new(): # 这里在测试上可能要下�
     data = []
     groups = {
         'ANGRY': [15, 11],
-        'NEGATIVE': [14, 10, 7, 6, 5, 3, 1], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
+        'NEGATIVE': [14, 7, 6, 5, 3, 1], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
         'POSITIVE': [2, 9, 10, 13],
         'NULL': [0, 4, 8, 12]
         }
@@ -103,7 +122,7 @@ def ysc_create_data_after_pretrain_new_new(): # 这里在测试上可能要下�
             else:
                 result_list[i] = random.uniform(0, 0.2)
         data.append(result_list * input_num_mul_index)
-    with open('output.csv', mode='w', newline='') as file:
+    with open('testdata.csv', mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerows(data)
     print("CSV文件已保存。")
@@ -187,7 +206,7 @@ class YscNet(spaic.Network):
 
         self._learner = Learner(algorithm='nearest_online_stdp', trainable=self.connection1, run_time=run_time) # 这里也只是训练 从输入到第一层的连接，其余层不变
 
-        # self.reward = spaic.Reward(num=label_num, dec_target=self.layer1, coding_time=run_time, coding_method='environment_reward', dec_sample_step=1) # 采样频率是每个时间步一次
+        self.reward = spaic.Reward(num=label_num, dec_target=self.layer1, coding_time=run_time, coding_method='environment_reward', dec_sample_step=1) # 采样频率是每个时间步一次
         #
         self.mon_weight = spaic.StateMonitor(self.connection1, 'weight', nbatch=-1)
         
@@ -201,7 +220,7 @@ class YscNet(spaic.Network):
 
         self.input(data) # 输入数据
 
-        # self.reward(reward) # 这里1，rstdp 退化为stdp 输入奖励 0 则不更新权重
+        self.reward(reward) # 这里1，rstdp 退化为stdp 输入奖励 0 则不更新权重
 
         self.run(run_time) # 前向传播
 
@@ -220,7 +239,7 @@ class YscNet(spaic.Network):
 
     def new_check_label_from_data(self, data):
         """
-            这里暗含了优先级的概念在里面
+            这里暗含了优先级的概念在里面, 但要是能真正影响 情绪输出的还得是 权重
         """
         if data[0][15] == 1 or data[0][11] == 1:
             return EMO["ANGRY"] # 
@@ -302,7 +321,8 @@ class YscNet(spaic.Network):
     def ysc_pretrain_step(self, data, label=None):
         # 根据与训练数据拿到标签
         # 保存到buffer中
-        output = self.step(data)
+
+        output = self.step(data, reward=1)#  reward  一定得是1
         print(output)
         label = self.new_check_label_from_data(data)
         # print(label)
@@ -314,7 +334,7 @@ class YscNet(spaic.Network):
         return output
 
     def ysc_testtrain_step(self, data):
-        output = self.step(data, reward=1) # 这里是1还是0呢？
+        output = self.step(data, reward=0) # 
         # print(label, " buffer len is ",len(self.buffer[label]))
         return output
 
@@ -337,17 +357,17 @@ class YscNet(spaic.Network):
                 temp_predict = self.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
                 real_label = self.new_check_label_from_data(temp_input)
                 
-                """ if index == 10:
-                    self.save_state(filename = 'weight10.pth') # 这个是正确的， 和stdp算法内部的是一样的
+                if index == 200:
+                    self.save_state(filename = 'save_200/ysc_model') # 这里需要手动删除保存的文件夹
+                    torch.save(self.buffer, 'ysc_buffer_200.pth') # buffer 也需要保存起来
                     
-                if index == 2000:
-                    self.save_state(filename = 'weight2000.pth') # 这个是正确的， 和stdp算法内部的是一样的 """
-                
+                if index == 1000:
+                    self.save_state(filename = 'save_1000/ysc_model') # 这里需要手动删除保存的文件夹
+                    torch.save(self.buffer, 'ysc_buffer_1000.pth') # buffer 也需要保存起来
+                    return
                 # for temp_i in range(len(self.buffer)): 
                 writer.add_scalars("buffer_len",{"len_0": len(self.buffer[0]),"len_1": len(self.buffer[1]),"len_2": len(self.buffer[2]),"len_3": len(self.buffer[3]) }, global_step=index) # 观察各个buffer 的情况
-                if index > 200:
-                    self.ysc_pre_train_over_save_new() # 保存和退出
-                    return
+    
 
                 if index > 900:
                     print(" assign_label = ", self.assign_label)
@@ -494,6 +514,10 @@ class YscNet(spaic.Network):
         # 加载权重和buffer的整合函数
         self.state_from_dict(filename=model_path, device=device) # 加载权重
         self.buffer = torch.load(buffer_path) # 加载bufferr
+        self.assign_label_update()
+
+    
+
 
 
 def train(net:YscNet):
@@ -502,17 +526,18 @@ def train(net:YscNet):
     net.ysc_pre_train_pipeline(load=False)
 
 def load_and_test(net:YscNet):
-    net.load_weight_and_buffer(model_path="save_all", buffer_path= "new_" + buffer_path) # 使用 200 轮测试
+    net.load_weight_and_buffer(model_path="save_200/ysc_model", buffer_path= 'ysc_buffer_200.pth') # 使用 200 轮测试
     net.ysc_load_and_test_pipeline() # 测试数据
 
 def single_test(net:YscNet):
-    net.load_weight_and_buffer(model_path="save_all", buffer_path="new_" + buffer_path) # 加载
+    net.load_weight_and_buffer(model_path="save_all", buffer_path="new_" + buffer_path) # 加载200的与训练数据
+    print(net.assign_label)
     t = 1
     while t < 20:
         t+=1
         result_list = [0.0] * 16
         for i in range(16):
-            if i == 4:
+            if i == 1 or i ==9 or i == 10: # 1 红， 9 10 抚摸
                 result_list[i] = 1.0
             else:
                 result_list[i] = random.uniform(0, 0.2)
@@ -523,18 +548,30 @@ def single_test(net:YscNet):
         real_label = net.new_check_label_from_data(temp_input)
         print(temp_predict, real_label)
 
+def test_1_9_10_mic_change():
+    # 这里要测试一下，可能需要多少次的输入 可以让 1 改过来， 其实感觉还挺ok 的， 只要完成一次成功的交互，神经元层面的特征就会被提取出来
 
+    # 用户的指令每次会 修改全局参数一段时间， 
+
+    # 用户输入 也会不断的进行
+
+
+    # 情感模型 只有在有交互， 或者， 有手势输入的时候才会 去进行影响buffer， 并且这里原则上还是要 不修改权重的，也不修改buffer否则就离谱了， 只有在
+
+    # 交互成功的时候修改reward = 1， 因此 正向传播的时候，按理说只修改一点神经元而已
+    pass
 
 if __name__ == "__main__":
     
     # 如果需要重新构造数据集的话，需要重新打开这个函数， 把其余部分注释掉
 
-    # ysc_create_data_before_pretrain()
+    
 
     ysc_robot_net = YscNet()
+    train(ysc_robot_net)
     # print(ysc_robot_net.connection1.weight)
     # load_and_test(ysc_robot_net)
-    single_test(ysc_robot_net)
+    # single_test(ysc_robot_net)
 
     
 
