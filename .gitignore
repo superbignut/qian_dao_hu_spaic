@@ -5,5 +5,5 @@ weight*
 *.pth
 *.csv
 /save*
-__*
+__py*
 mic*
