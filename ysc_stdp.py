@@ -41,9 +41,9 @@ buffer_path = 'ysc_buffer.pth'
 device = torch.device("cuda:0")
 
 input_node_num = 16
-input_num_mul = 16 #  把输入维度放大10倍
+input_num_mul_index = 16 #  把输入维度放大10倍
 
-input_node_num = input_node_num * input_num_mul #  把输入维度放大10倍
+input_node_num = input_node_num * input_num_mul_index #  把输入维度放大10倍
 
 output_node_num = 4
 
@@ -79,17 +79,18 @@ def ysc_create_data_before_pretrain_new_new():
                 result_list[i] = 1.0
             else:
                 result_list[i] = random.uniform(0, 0.2)
-        data.append(result_list)
+        data.append(result_list * input_num_mul_index)
     with open('output.csv', mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerows(data)
     print("CSV文件已保存。")
-def ysc_create_data_after_pretrain_new_new():
-    rows = 200
+def ysc_create_data_after_pretrain_new_new(): # 这里在测试上可能要下一点功夫了, 当然要做到比训练数据集，更加的多样化， 如果有问题，就可能要 重新回去修改
+                                              # 训练数据集的构建，之前做的确实太简单了
+    rows = 400
     data = []
     groups = {
         'ANGRY': [15, 11],
-        'NEGATIVE': [14, 7, 6, 5, 3, 1],
+        'NEGATIVE': [14, 10, 7, 6, 5, 3, 1], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
         'POSITIVE': [2, 9, 10, 13],
         'NULL': [0, 4, 8, 12]
         }
@@ -98,14 +99,15 @@ def ysc_create_data_after_pretrain_new_new():
         result_list = [0.0] * input_node_num
         for i in range(input_node_num):
             if i in selected_group:
-                result_list[i] = 1.0 # 测试的话, 可以引入一些噪声
+                result_list[i] = 1.0
             else:
                 result_list[i] = random.uniform(0, 0.2)
-            data.append(result_list)
-    with open('testdata.csv', mode='w', newline='') as file:
+        data.append(result_list * input_num_mul_index)
+    with open('output.csv', mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerows(data)
     print("CSV文件已保存。")
+
 def ysc_create_data_before_pretrain_new():
     rows = 10000
     data = []
@@ -205,8 +207,14 @@ class YscNet(spaic.Network):
 
         return self.output.predict # 输出 结果
     
-    def ysc_pre_train_over_save(self):
+    def ysc_pre_train_over_save_new(self):
         # print(self.buffer)
+        spaic.Network_saver.network_save(self, filename='save_all', save=True, combine=False)
+        # self.save_state(filename = model_path) # 这里需要手动删除保存的文件夹
+        torch.save(self.buffer, "new_" + buffer_path) # buffer 也需要保存起来
+
+    def ysc_pre_train_over_save(self):
+        
         self.save_state(filename = model_path) # 这里需要手动删除保存的文件夹
         torch.save(self.buffer, buffer_path) # buffer 也需要保存起来
 
@@ -329,20 +337,26 @@ class YscNet(spaic.Network):
                 temp_predict = self.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
                 real_label = self.new_check_label_from_data(temp_input)
                 
-                if index == 10:
+                """ if index == 10:
                     self.save_state(filename = 'weight10.pth') # 这个是正确的， 和stdp算法内部的是一样的
                     
                 if index == 2000:
-                    self.save_state(filename = 'weight2000.pth') # 这个是正确的， 和stdp算法内部的是一样的
+                    self.save_state(filename = 'weight2000.pth') # 这个是正确的， 和stdp算法内部的是一样的 """
                 
                 # for temp_i in range(len(self.buffer)): 
                 writer.add_scalars("buffer_len",{"len_0": len(self.buffer[0]),"len_1": len(self.buffer[1]),"len_2": len(self.buffer[2]),"len_3": len(self.buffer[3]) }, global_step=index) # 观察各个buffer 的情况
+                if index > 200:
+                    self.ysc_pre_train_over_save_new() # 保存和退出
+                    return
 
-                if index > 100:
+                if index > 900:
                     print(" assign_label = ", self.assign_label)
                     print(" deque", sum(right_deque))
                     print(" buffer_num", len(self.buffer[0]), len(self.buffer[1]), len(self.buffer[2]), len(self.buffer[3]))
-                    
+                
+                if index >= 1000:
+                    break # 虽然数据有10000个， 但是只训练1000次
+
                 if temp_predict == real_label:
                     right_deque.append(1)
                 else:
@@ -449,6 +463,66 @@ class YscNet(spaic.Network):
             # 如果分母是零 说明是刚开始数据还不够的时候，就需要不管就行
             return 
             
+    def ysc_load_and_test_pipeline(self):
+        global im   
+        df = pd.read_csv('testdata.csv', header=None) # 读取测试数据
+        data = df.values.tolist()
+
+        print("开始测试")
+        right_deque = deque(iterable=[0 for _ in range(100)], maxlen=100) # 用来统计最近100个的正确情况, 也保证了最开始一定是从0 往上走
+
+        for index, row in enumerate(tqdm(data)):
+            temp_input = torch.tensor(row, device=device).unsqueeze(0) # 增加了一个维度
+            temp_predict = self.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
+            real_label = self.new_check_label_from_data(temp_input)
+            
+            writer.add_scalars("buffer_len",{"len_0": len(self.buffer[0]),"len_1": len(self.buffer[1]),"len_2": len(self.buffer[2]),"len_3": len(self.buffer[3]) }, global_step=index) # 观察各个buffer 的情况
+            if index > 200:
+                # self.ysc_pre_train_over_save_new() # 保存和退出
+                return
+
+            if temp_predict == real_label:
+                right_deque.append(1)
+            else:
+                right_deque.append(0)
+            writer.add_scalar(tag="acc_predict", scalar_value= sum(right_deque) / len(right_deque), global_step=index) # 每次打印准确率
+
+            im = self.mon_weight.plot_weight(time_id=-1, linewidths=0, linecolor='white',
+                    reshape=True, n_sqrt=int(np.sqrt(label_num)), side=16, im=im, wmax=1) #把权重 画出来 100 * 784 = 100 * 28 * 28
+            
+    def load_weight_and_buffer(self, model_path=model_path, buffer_path = buffer_path):
+        # 加载权重和buffer的整合函数
+        self.state_from_dict(filename=model_path, device=device) # 加载权重
+        self.buffer = torch.load(buffer_path) # 加载bufferr
+
+
+def train(net:YscNet):
+    # 训练流程
+    # print(ysc_robot_net.connection1.weight)
+    net.ysc_pre_train_pipeline(load=False)
+
+def load_and_test(net:YscNet):
+    net.load_weight_and_buffer(model_path="save_all", buffer_path= "new_" + buffer_path) # 使用 200 轮测试
+    net.ysc_load_and_test_pipeline() # 测试数据
+
+def single_test(net:YscNet):
+    net.load_weight_and_buffer(model_path="save_all", buffer_path="new_" + buffer_path) # 加载
+    t = 1
+    while t < 20:
+        t+=1
+        result_list = [0.0] * 16
+        for i in range(16):
+            if i == 4:
+                result_list[i] = 1.0
+            else:
+                result_list[i] = random.uniform(0, 0.2)
+        result_list = result_list * 16
+        # print(result_list)
+        temp_input = torch.tensor(result_list , device=device).unsqueeze(0) # 增加了一个维度
+        temp_predict = net.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
+        real_label = net.new_check_label_from_data(temp_input)
+        print(temp_predict, real_label)
+
 
 
 if __name__ == "__main__":
@@ -459,9 +533,10 @@ if __name__ == "__main__":
 
     ysc_robot_net = YscNet()
     # print(ysc_robot_net.connection1.weight)
-    
+    # load_and_test(ysc_robot_net)
+    single_test(ysc_robot_net)
 
-    ysc_robot_net.ysc_pre_train_pipeline(load=False)
+    
 
     # ysc_robot_net.ysc_test_pretrain()
 

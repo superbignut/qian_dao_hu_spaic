@@ -4,3 +4,5 @@ weight*
 /weight*
 *.pth
 *.csv
+/save*
+__*
