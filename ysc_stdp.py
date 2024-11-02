@@ -515,8 +515,97 @@ class YscNet(spaic.Network):
         self.state_from_dict(filename=model_path, device=device) # 加载权重
         self.buffer = torch.load(buffer_path) # 加载bufferr
         self.assign_label_update()
-
     
+    
+    """
+        这里是情感模型的核心逻辑的地方，用于处理情感 怎么因为收到外界的交互 而进行的情感输出转变，
+
+        首先要转变的有依据， 其次要转变的自然不僵硬，其实在虚拟环境中的尝试 就会发现，情感模型的输出更像是一种推波助澜的
+
+        趋势，而不是直截了当的结果，虚拟环境里是用 deque 进行的缓冲， 
+
+    """
+    def emotion_core_mic_change(self):
+        global im
+        step_times = 2
+        buffer_times = 1
+        t = 1
+        right_predict_num = 0
+        reward = 2
+
+        result_list = [0.0] * 16
+        for i in range(16):
+            if i == 1 or i ==9 or i == 10: # 1 红， 9 10 抚摸
+                result_list[i] = 1.0
+            else:
+                result_list[i] = random.uniform(0, 0.2)
+        
+
+        # print(result_list.shape)
+
+        df = pd.read_csv('output.csv', header=None) # 读取数据
+        data = df.values.tolist()
+
+        """
+            这里的感觉是， 是有一个新的输入模式的输入，比如1 9 10 ，是以前从没有过的特征，因此这个特征很可能要与 之前的其他特征 进行混合
+
+            ，这里的感觉就是没有必要一定要记住 之前的预训练的 效果，可以做一个记忆模块，专门做最近的时间的输入的buffer， 每个一段时间，做一次回放
+
+            类似于强化一下记忆， 这样就可以做的更仿生一点，
+
+            比如做一个，len是10 的buffer_deque ，每次新的交互都会 回忆一下过去的10个时间片记忆， 或者是回忆最相关的单元？？？
+
+            这个最相关 的单元 用 hash 来做是比较可以的吗， 寻找最相似太麻烦了， 直接用最近片段的也ok
+        
+        """
+        while t < 100:
+            t+=1
+            if t % 2 == 0:                
+                input_data = torch.tensor(data[t], device=device).unsqueeze(0)
+                output = self.step(input_data, reward=reward) # 这里的reward 也可以进行 修改 或者 进行多次前向传播， 或者我的batch 的概念一直没用，或者stdp不允许batch
+                    
+                im = self.mon_weight.plot_weight(time_id=-1, linewidths=0, linecolor='white',
+                    reshape=True, n_sqrt=int(np.sqrt(label_num)), side=16, im=im, wmax=1) #把权重 画出来 100 * 784 = 100 * 28 * 28
+                label = self.new_check_label_from_data(input_data)
+                self.buffer[label].append(output)
+            else:   
+                input_data = torch.tensor(result_list * 16, device=device).unsqueeze(0)    
+                for _ in range(step_times):
+                    output = self.step(input_data, reward=reward) # 这里的reward 也可以进行 修改 或者 进行多次前向传播， 或者我的batch 的概念一直没用，或者stdp不允许batch
+                    
+                    im = self.mon_weight.plot_weight(time_id=-1, linewidths=0, linecolor='white',
+                        reshape=True, n_sqrt=int(np.sqrt(label_num)), side=16, im=im, wmax=1) #把权重 画出来 100 * 784 = 100 * 28 * 28
+                    label = EMO["POSITIVE"] # 这里其实应该 根据真实的交互结果来设计，但是 模拟的话就暂时写死POSITIVE
+                    
+                    for _ in range(buffer_times // step_times):
+                        self.buffer[label].append(output) # 这里其实可以 有不同程度的更改 , 比如多添加几次
+                
+            self.assign_label_update()
+            if self.just_predict_with_no_assign_label_update(output=output) == label:
+                right_predict_num+=1
+            if right_predict_num == 100:
+                print(" ok", t)
+                return 
+            print(t)
+
+
+                
+    def just_predict_with_no_assign_label_update(self, output):
+        # 根据输出 返回模型的预测
+        if self.assign_label == None:
+            raise ValueError
+        
+        temp_cnt = [0 for _ in range(len(self.buffer))]     # 四个0
+        temp_num = [0 for _ in range(len(self.buffer))]
+
+        for i in range(len(self.assign_label)):
+            # print(i)
+            temp_cnt[self.assign_label[i]] += output[0, i]  # 第一个维度是batch, 
+            temp_num[self.assign_label[i]] += 1
+    
+        predict_label = torch.argmax(torch.tensor(temp_cnt) / torch.tensor(temp_num))
+        
+        return predict_label
 
 
 
@@ -548,18 +637,24 @@ def single_test(net:YscNet):
         real_label = net.new_check_label_from_data(temp_input)
         print(temp_predict, real_label)
 
-def test_1_9_10_mic_change():
+
     # 这里要测试一下，可能需要多少次的输入 可以让 1 改过来， 其实感觉还挺ok 的， 只要完成一次成功的交互，神经元层面的特征就会被提取出来
 
     # 用户的指令每次会 修改全局参数一段时间， 
 
     # 用户输入 也会不断的进行
 
+    # 这里应该是 有一个 之前没有的输入进来， 怎么处理一下， 或者就是 红色 + 抚摸
+
 
     # 情感模型 只有在有交互， 或者， 有手势输入的时候才会 去进行影响buffer， 并且这里原则上还是要 不修改权重的，也不修改buffer否则就离谱了， 只有在
 
     # 交互成功的时候修改reward = 1， 因此 正向传播的时候，按理说只修改一点神经元而已
     pass
+def mic_change(net:YscNet):
+    net.load_weight_and_buffer(model_path="save_200/ysc_model", buffer_path= 'ysc_buffer_200.pth') # 使用 200 轮测试 # 加载200次 预训练模型和buffer
+    net.emotion_core_mic_change() # 连续微调，看什么时候能反转过来
+
 
 if __name__ == "__main__":
     
@@ -568,10 +663,13 @@ if __name__ == "__main__":
     
 
     ysc_robot_net = YscNet()
-    train(ysc_robot_net)
+    ysc_robot_net.reward(1) # 这里不加上总会出问题
+    # ysc_robot_net.build()
+    # train(ysc_robot_net)
     # print(ysc_robot_net.connection1.weight)
     # load_and_test(ysc_robot_net)
     # single_test(ysc_robot_net)
+    mic_change(ysc_robot_net)
 
     
 
