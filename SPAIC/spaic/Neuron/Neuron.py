@@ -2036,10 +2036,10 @@ class LIFSTDPEXModel(NeuronModel):
 
         # self._constant_variables['V0'] = 1
 
-        self._constant_variables['Vth'] = kwargs.get('v_th', -52.0)
+        self._constant_variables['Vth'] = kwargs.get('v_th', -52.0) # 发放的阈值也是 负的
         self._constant_variables['Vreset'] = kwargs.get('v_reset', -60.0)
         self._constant_variables['Vrest'] = kwargs.get('v_rest', -65.0)
-        self._constant_variables['th_inc'] = kwargs.get('th_inc', 0.05)
+        self._constant_variables['th_inc'] = kwargs.get('th_inc', 0.05) # 阈值每次增加
         self._constant_variables['decay_th'] = kwargs.get('decay_th', np.exp(-1/1e7))
         self._constant_variables['decay_v'] = kwargs.get('decay_v', np.exp(-1/100))
 

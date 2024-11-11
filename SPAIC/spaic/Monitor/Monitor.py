@@ -524,6 +524,11 @@ class StateMonitor(Monitor):
                 #
                 # value = value.transpose(0, 2, 1, 3)
                 # value = value.reshape(2*side, 5*side)
+
+                ###
+                # value = value.reshape(n_sqrt, n_sqrt, side, side)
+                # side1 = 10
+                # side2 = 20
                 value = value.reshape(n_sqrt, n_sqrt, side, side)
 
                 value = value.transpose(0, 2, 1, 3)
