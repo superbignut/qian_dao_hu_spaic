@@ -52,8 +52,8 @@ class TestNet(spaic.Network):
                                    unit_conversion=0.6375)
 
         # neuron group
-        self.layer1 = spaic.NeuronGroup(label_num, model='lifstdp_ex') # 引入一个随机抑制看看 
-        self.layer2 = spaic.NeuronGroup(label_num, model='lifstdp_ih')
+        self.layer1 = spaic.NeuronGroup(label_num, model='lifstdp_ex', decay_v=0.99, decay_th=1.0) # 电压衰减 vth_theta不衰减每次增加一点
+        self.layer2 = spaic.NeuronGroup(label_num, model='lifstdp_ih', decay_v=0.90)
 
         # decoding
         self.output = spaic.Decoder(num=label_num, dec_target=self.layer1, time=run_time,
@@ -78,6 +78,7 @@ class TestNet(spaic.Network):
 
 
 Net = TestNet()
+Net.reward(1)
 Net.build(backend)
 
 print("Start running")
@@ -101,6 +102,8 @@ for epoch in range(1):
         # print(data)
         Net.input(data)
         Net.reward(1)
+        if i > 60:
+            print(i)
         Net.run(run_time)
         torch.save(Net._backend._parameters_dict, 'weight_origin.pth')
         output = Net.output.predict
@@ -129,6 +132,7 @@ for epoch in range(1):
         for i, item in enumerate(test_loader):
             data, label = item
             Net.input(data)
+            
             Net.run(run_time)
             output = Net.output.predict
 

@@ -641,7 +641,7 @@ class Backend(ABC):
         self.time = 0.0  # current backend time
         self.n_time_step = 0
         for key, value in self._variables.items():
-            if '[stay]' in key:
+            if '[stay]' in key: # 这个stay 是不变的意思吗
                 self._InitVariables_dict[key] = self._variables[key].detach()
 
         # Initialize untrainable variables

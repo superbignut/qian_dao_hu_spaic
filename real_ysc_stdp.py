@@ -1,34 +1,11 @@
 """
-    在虚拟环境中， 维度开的大一点是没问题的，但是在真实环境中，端到端似乎不太行，
+    当下的思路是， 先训练， 再红和抚摸输入，每次微调buffer, 现在是发现好像不同的类别的脉冲 都是在一个时刻发放的
 
-    真正能用到的其实就是，特征提取到的结果，然后用结果来作为spaic的输入才行
+    不同的冒充基本是叠加在一起的，所以这样的话 就先简单的 把 全是 -1 的放到 其他的buffer 中就好，或者复杂一点，把buffer 的 最近的
 
-    然后的话，打算把情感模型的输出放大为3，分别是，积极，消极，愤怒 三个，对应的动作是 亲近，远离，汪汪叫
+    数据 加上 -1*output 的数据 放回最新的buffr， 也会达到微调并且尽量少影响原有buffer
 
-
-            根据1维的数据，返回应有的标签 
-            # 0   1   2   3   |    4   5   6   7     |    8   9   10   11    |    12    13     14    15    训练优先级递增
-            # 无  红  蓝  暗   |   无   酒  酒  酒    |    无  摸   摸   踢     |    无   积极   批评   侮辱 
-            # 
-            # 返回 0 1 2 3   代表 NULL, 积极, 消极, 愤怒
-
-            侮辱：
-                15 11
-
-            消极：
-                14 7 6 5 3 1
-
-            积极：
-                2 9 10 13
-
-            NULL:
-                0 4 8 12
-"""
-
-
-
-"""
-    真实狗子上， 训练的样本会发生一点变化
+    此外 我还想做一个 等待机制，就或者连续 多个时刻没有交互， 就正常更新一次buffer， 或者如果发生交互 则立刻对过去时刻 进行更新
 
 
 
@@ -54,7 +31,7 @@ import pandas as pd
 from collections import deque
 import traceback
 import matplotlib.pyplot as plt
-
+import time
 
 EMO = {"POSITIVE":0, "NEGATIVE":1, "ANGRY":2} # NULL, 积极，消极，愤怒
 
@@ -80,6 +57,8 @@ output_node_num = 3 # 这里不写成4 ， 如果输入全是 0 的话， 就不
 
 label_num = 100 # 这里要不了这么多
 
+assign_label_len = 15
+
 bat_size = 1
 
 backend = spaic.Torch_Backend(device)
@@ -92,27 +71,40 @@ time_step = int(run_time / backend.dt)
 im = None
 
 """
-    | 0     1     2    3  |   4    5  |  6    7  |  9      10  |   11    12     13 |     14    15   |   8    |
-    | 摸    摸    踢   踢  |  红    蓝 |  酒   酒 |  表扬   批评 |   上    下     挥  |    电低  电低  |   踢打 | 
+    实际的传感器排序就如下面所示，输入给模型的编码输入就是 下面的 16 * 16
+
+    | 0     1     2    3      |   4    5   |  6     |  7     8     9   |   10    11   |  12    |  13    14    15  |
+    | 蓝    红    黑  表扬语义 |  批评  批评 | 酒精高  | 点赞  手掌  拳头  |  抚摸  抚摸  |   拍打  | 电低  电低  电低  |     
 """
 
 def ysc_create_data_before_pretrain_new_new():
     rows = 10000
     data = []
     groups = {
-        'ANGRY':    [2, 3, 8],
-        'NEGATIVE': [4, 6, 7, 10, 12, 14, 15], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
-        'POSITIVE': [0, 1, 5, 9, 11, 13],
+        'ANGRY':    [[2],[9] [12]],
+        'NEGATIVE': [[1], [4,5], [6],[13,14,15]], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
+        'POSITIVE': [[0], [3], [7], [8],[10,11]],
         }
     for _ in range(rows):
-        selected_group = random.choice(list(groups.values()))
+        selected_emotion = random.choice(list(groups.keys()))
+        selected_group = random.choice(groups[selected_emotion])
+
+        unselected_group_emo = [] # 找到同一情感但是不同group 的位置
+        for item in groups[selected_emotion]:
+            if item != selected_group:
+                unselected_group_emo.extend(item)
+
+        # print(unselected_group_emo)
         result_list = [0.0] * input_node_num
         for i in range(input_node_num):
             if i in selected_group:
-                result_list[i] = 1.0
+                result_list[i] = 1.0 # 选中的情感
+            elif i in unselected_group_emo:
+                result_list[i] = 0.8 # 不是主要输入
             else:
                 result_list[i] = random.uniform(0, 0.2)
         data.append(result_list * input_num_mul_index)
+
     with open('output.csv', mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerows(data)
@@ -124,7 +116,7 @@ class YscNet(spaic.Network):
     def __init__(self):
         super().__init__()
 
-        self.input = spaic.Encoder(num=input_node_num, time=run_time, coding_method='poisson', unit_conversion=0.8) # 就是给发放速率乘了因子,from 论文
+        self.input = spaic.Encoder(num=input_node_num, time=run_time, coding_method='poisson', unit_conversion  =0.8) # 就是给发放速率乘了因子,from 论文
 
         self.layer1 = spaic.NeuronGroup(label_num, model='lifstdp_ex') # stdp_ex 比 stdp_ih 多了一层阈值的衰减 \tao_\theta, 论文中有提到这个自适应的阈值
         
@@ -152,6 +144,21 @@ class YscNet(spaic.Network):
 
         self.buffer = [[] for _ in range(output_node_num)] # 0, 1 投票神经元的buffer # 这里不能写成 [[]] * 4 的形式， 否则会出问题
 
+        """
+            这个label作为 预测的核心思想：
+            + 预训练的时候：
+                将output放到对应的label中，达到一种情感的预输入
+            + 实际微调的时候：
+                对于每次的输出结果result_1*100代表100个解码神经元的输出、交互结果_0_1代表正反馈还是负反馈
+                    - 正反馈强化正确的buffer， 弱化相反的buffer，
+                        - 比如解码输出是00110
+                        - 强化就是把0 0 +1 +1 0 放到对应的buffer中
+                        - 弱化就是把0 0 -1 -1 0 放到对应的buffer中
+                    - 负反馈强化
+                    - 这里还其实可以引入一种衰减机制， 比如在刚做完一次交互的时候，反应、输出很强烈，但是慢慢的buffer会逐渐变弱
+
+        """
+
         self.assign_label = None # 统计结束的100 个神经元的代表的情感对象是什么
 
     def step(self, data, reward=1): # reward 要想加进去的话, 需要去修改一下stdp 的算法
@@ -175,30 +182,30 @@ class YscNet(spaic.Network):
         self.save_state(filename = model_path) # 这里需要手动删除保存的文件夹
         torch.save(self.buffer, buffer_path) # buffer 也需要保存起来
 
-        """
-            | 0     1     2    3  |   4    5  |  6    7  |  9      10  |   11    12     13 |     14    15   |   8    |
-            | 摸    摸    踢   踢  |  红    蓝 |  酒   酒 |  表扬   批评 |   上    下     挥  |    电低  电低  |   踢打 | 
-        """
+    """
+        实际的传感器排序就如下面所示，输入给模型的编码输入就是 下面的 16 * 16
 
-        """
-        groups = {
-            'ANGRY':    [2, 3, 8] 
-            'NEGATIVE': [4, 6, 7, 10, 12, 14, 15], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
-            'POSITIVE': [0, 1, 5, 9, 11, 13],
-            }
-        """
+        | 0     1     2    3      |   4    5   |  6     |  7     8     9   |   10    11   |  12    |  13    14    15  |
+        | 蓝    红    黑  表扬语义 |  批评  批评 | 酒精高  | 点赞  拳头   手掌 |  抚摸  抚摸  |   拍打  | 电低  电低  电低  |     
+
+    groups = {
+        'ANGRY':    [[2],[9] [12]],
+        'NEGATIVE': [[1], [4,5], [6],[13,14,15]], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
+        'POSITIVE': [[0], [3], [7], [8],[10,11]],
+        }
+    """
 
     def new_check_label_from_data(self, data):
         """
             这里暗含了优先级的概念在里面, 但要是能真正影响 情绪输出的还得是 权重
         """
-        if data[0][2] == 1 or data[0][3] == 1 or data[0][8] == 1:
+        if data[0][2] == 1 or data[0][9] == 1 or data[0][12] == 1:
             return EMO["ANGRY"] # 
         
-        elif data[0][15] == 1 or  data[0][14] == 1 or data[0][12] == 1 or data[0][10] == 1 or data[0][7] == 1 or data[0][6] == 1 or data[0][4] == 1:
+        elif data[0][15] == 1 or  data[0][14] == 1 or data[0][13] == 1 or data[0][6] == 1 or data[0][4] == 1 or data[0][5] == 1 or data[0][1] == 1:
             return EMO['NEGATIVE']
         
-        elif data[0][0] == 1 or data[0][1] == 1 or data[0][5] == 1 or data[0][9] == 1 or data[0][11] == 1 or data[0][13] == 1:
+        elif data[0][0] == 1 or data[0][3] == 1 or data[0][7] == 1  or data[0][8] == 1  or data[0][10] == 1 or data[0][11] == 1:
             return EMO['POSITIVE']
         
         else:
@@ -210,10 +217,10 @@ class YscNet(spaic.Network):
         # print(output)
         temp_cnt = [0 for _ in range(len(self.buffer))]     # 四个0
         temp_num = [0 for _ in range(len(self.buffer))]
-        self.assign_label_update()                          # 统计一下每个神经元的归属label
+        self.assign_label_update()                          # 这里每次都要更新一下有点太频繁了其实
         
         if self.assign_label == None: # 最开始跳过                  
-            return 0
+            return 0, 0
 
         for i in range(len(self.assign_label)):
             # print(i)
@@ -226,7 +233,7 @@ class YscNet(spaic.Network):
         # tensor 保证除法可以 分别相除
         # 这里其实应该 比较的是 去掉0 之后的平均值, 或者是 去掉 一个阈值以下的 值得平均值, 但要是所有得都是1 那就 没有必要了
                     
-        return predict_label # 返回预测label
+        return predict_label, output # 返回预测label
 
     def ysc_pretrain_step(self, data, label=None, reward=1):
         # 根据与训练数据拿到标签
@@ -235,9 +242,7 @@ class YscNet(spaic.Network):
         output = self.step(data, reward=reward)#  reward  一定得是1
         print(output)
         label = self.new_check_label_from_data(data)
-        # print(label)
-        # print(self.buffer)
-        # print(output.shape)
+
         self.buffer[label].append(output)
         # print(self.buffer)
         # print(label, " buffer len is ",len(self.buffer[label]))
@@ -263,23 +268,21 @@ class YscNet(spaic.Network):
             # right_predict_num = 0
             for index, row in enumerate(tqdm(data)):
                 temp_input = torch.tensor(row, device=device).unsqueeze(0) # 增加了一个维度
-                temp_predict = self.ysc_pretrain_step_and_predict(data=temp_input, reward=1) # 返回预测结果
+                temp_predict, _ = self.ysc_pretrain_step_and_predict(data=temp_input, reward=1) # 返回预测结果
                 real_label = self.new_check_label_from_data(temp_input)
                 
-                if index == 200:
-                    self.save_state(filename = 'save_200/real_ysc_model_64') # 这里需要手动删除保存的文件夹
-                    torch.save(self.buffer, 'real_ysc_buffer_200_64.pth') # buffer 也需要保存起来
+                if index == 400:
+                    
+
+                    self.save_state(filename = 'save_400/real_ysc_model_mic') # 这里需要手动删除保存的文件夹
+                    torch.save(self.buffer, 'real_ysc_buffer_400_mic.pth') # buffer 也需要保存起来
                     # return
 
                 if index == 600:
-                    self.save_state(filename = 'save_600/real_ysc_model_64') # 这里需要手动删除保存的文件夹
-                    torch.save(self.buffer, 'real_ysc_buffer_600_64.pth') # buffer 也需要保存起来
+                    self.save_state(filename = 'save_600/real_ysc_model_mic') # 这里需要手动删除保存的文件夹
+                    torch.save(self.buffer, 'real_ysc_buffer_600_mic.pth') # buffer 也需要保存起来
                     return
                     
-                    """                 if index == 1000:
-                    self.save_state(filename = 'save_1000/real_ysc_model_64') # 这里需要手动删除保存的文件夹
-                    torch.save(self.buffer, 'real_ysc_buffer_1000_64.pth') # buffer 也需要保存起来
-                    return """
                 # for temp_i in range(len(self.buffer)): 
                 writer.add_scalars("buffer_len",{"len_0": len(self.buffer[0]),"len_1": len(self.buffer[1]),"len_2": len(self.buffer[2])}, global_step=index) # 观察各个buffer 的情况
     
@@ -290,7 +293,7 @@ class YscNet(spaic.Network):
                 writer.add_scalar(tag="acc_predict", scalar_value= sum(right_deque) / len(right_deque), global_step=index) # 每次打印准确率
 
                 im = self.mon_weight.plot_weight(time_id=-1, linewidths=0, linecolor='white',
-                    reshape=True, n_sqrt=int(np.sqrt(label_num)), side=16, im=im, wmax=1) #把权重 画出来 100 * 784 = 100 * 28 * 28
+                    reshape=True, n_sqrt=int(np.sqrt(label_num)), side=16, im=im, wmax=0.6) #把权重 画出来 100 * 784 = 100 * 28 * 28
                 
 
             self.ysc_pre_train_over_save() # 预训练结束， 开始 统计结果，然后进行测试
@@ -355,7 +358,7 @@ class YscNet(spaic.Network):
         if newoutput != None:
             self.buffer[newlabel].append(newoutput)
         try:
-            avg_buffer = [sum(self.buffer[i][-400:]) / len(self.buffer[i][-400:]) for i in range(len(self.buffer))] # sum_buffer 是一个求和之后 取平均的tensor  n * 1 * 100
+            avg_buffer = [sum(self.buffer[i][-assign_label_len:]) / len(self.buffer[i][-assign_label_len:]) for i in range(len(self.buffer))] # sum_buffer 是一个求和之后 取平均的tensor  n * 1 * 100
             # 这里不如改成 200 试一下
             # 这里可以只使用 后面的数据进行统计  比如[-300:]
             # avg_buffer = [sum_buffer[i] / len(agent.buffer[i]) for i in range(len(agent.buffer))]
@@ -376,7 +379,7 @@ class YscNet(spaic.Network):
 
         for index, row in enumerate(tqdm(data)):
             temp_input = torch.tensor(row, device=device).unsqueeze(0) # 增加了一个维度
-            temp_predict = self.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
+            temp_predict, _ = self.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
             real_label = self.new_check_label_from_data(temp_input)
             
             writer.add_scalars("buffer_len",{"len_0": len(self.buffer[0]),"len_1": len(self.buffer[1]),"len_2": len(self.buffer[2]),"len_3": len(self.buffer[3]) }, global_step=index) # 观察各个buffer 的情况
@@ -399,15 +402,7 @@ class YscNet(spaic.Network):
         self.buffer = torch.load(buffer_path) # 加载bufferr
         self.assign_label_update()
     
-    
-    """
-        这里是情感模型的核心逻辑的地方，用于处理情感 怎么因为收到外界的交互 而进行的情感输出转变，
 
-        首先要转变的有依据， 其次要转变的自然不僵硬，其实在虚拟环境中的尝试 就会发现，情感模型的输出更像是一种推波助澜的
-
-        趋势，而不是直截了当的结果，虚拟环境里是用 deque 进行的缓冲， 
-
-    """
     def emotion_core_mic_change(self):
         global im
         step_times = 2
@@ -429,18 +424,6 @@ class YscNet(spaic.Network):
         df = pd.read_csv('output.csv', header=None) # 读取数据
         data = df.values.tolist()
 
-        """
-            这里的感觉是， 是有一个新的输入模式的输入，比如1 9 10 ，是以前从没有过的特征，因此这个特征很可能要与 之前的其他特征 进行混合
-
-            ，这里的感觉就是没有必要一定要记住 之前的预训练的 效果，可以做一个记忆模块，专门做最近的时间的输入的buffer， 每个一段时间，做一次回放
-
-            类似于强化一下记忆， 这样就可以做的更仿生一点，
-
-            比如做一个，len是10 的buffer_deque ，每次新的交互都会 回忆一下过去的10个时间片记忆， 或者是回忆最相关的单元？？？
-
-            这个最相关 的单元 用 hash 来做是比较可以的吗， 寻找最相似太麻烦了， 直接用最近片段的也ok
-        
-        """
         while t < 100:
             t+=1
             if t % 2 == 0:                
@@ -490,50 +473,41 @@ class YscNet(spaic.Network):
         
         return predict_label
 
+    def influence_all_buffer(self, interact, temp_output):
+        # interact ： 0 积极交互 1 消极交互
+        if interact == 0:
+            self.buffer[EMO['POSITIVE']].append(temp_output)
+
+            temp_pop = self.buffer[EMO["NEGATIVE"]].pop(-1)
+            print(temp_pop, -1 * temp_output + temp_pop)
+            self.buffer[EMO['NEGATIVE']].append(-1 * temp_output + temp_pop)
+            # self.buffer[EMO['ANGRY']].append(-1 * temp_output)
+        else:
+            self.buffer[EMO['NEGATIVE']].append(temp_output)
+
+            temp_pop = self.buffer[EMO["POSITIVE"]].pop(-1)
+            print(temp_pop, -1 * temp_output + temp_pop)
+            self.buffer[EMO['POSITIVE']].append(-1 * temp_output)
+            # self.buffer[EMO['ANGRY']].append(temp_output)
+        self.assign_label_update() # 施加了积极和消极得影响后 重新 assign label
 
 
-def train(net:YscNet):
-    # 训练流程
-    # print(ysc_robot_net.connection1.weight)
-    net.ysc_pre_train_pipeline(load=False)
 
-def load_and_test(net:YscNet):
-    net.load_weight_and_buffer(model_path="save_200/ysc_model", buffer_path= 'ysc_buffer_200.pth') # 使用 200 轮测试
-    net.ysc_load_and_test_pipeline() # 测试数据
+    def plot_spike_and_valt(self):
+        
+        time_line = self.mon_V.times
+        value_line = self.mon_V.values 
 
-def single_test(net:YscNet):
-    # 这里应该是 有一个 之前没有的输入进来， 怎么处理一下， 或者就是 红色 + 抚摸
-    net.load_weight_and_buffer(model_path="save_600/real_ysc_model_64", buffer_path="real_ysc_buffer_600_64.pth") # 加载200的与训练数据
-    print(net.assign_label)
-    t = 1
-    while t < 20:
-        t+=1
-        result_list = [0.0] * input_node_num_origin
-        for i in range(input_node_num_origin):
-            if i == 4 or i== 0 or i == 1 : # 这里对比一下 104 和 01 的区别
-                result_list[i] = 1.0
-            else:
-                result_list[i] = random.uniform(0, 0.2)
-        result_list = result_list * input_num_mul_index
-        # print(result_list)
-        temp_input = torch.tensor(result_list , device=device).unsqueeze(0) # 增加了一个维度
-        temp_predict = net.ysc_pretrain_step_and_predict(data=temp_input) # 返回预测结果
-        real_label = net.new_check_label_from_data(temp_input)
-        print(temp_predict, real_label)
-
-        time_line = net.mon_V.times
-        value_line = net.mon_V.values 
-
-        spk_dot = net.spk_O.spk_index
-        spk_time = net.spk_O.spk_times
-        print(spk_dot[0])
+        spk_dot = self.spk_O.spk_index
+        spk_time = self.spk_O.spk_times
+        # print(spk_dot[0])
 
         # fig, axs = plt.subplots(5, 5, figsize=(10, 10))
         # print(value_line[0][0], value_line[0][6])
         # axs = axs.ravel()
         # plt.subplot(2,1,1)
         plt.plot(time_line, value_line[0][0]) # 发送 
-        plt.plot(time_line, value_line[0][1])
+        plt.plot(time_line, value_line[0][30])
 
         # plt.subplot(2,1,2)
         print(spk_time[0], spk_dot[0]) # 发送时间，发送编号
@@ -542,6 +516,57 @@ def single_test(net:YscNet):
         # plt.plot(time_line, value_line[0][0])
         # plt.tight_layout()
         plt.show()
+
+def train(net:YscNet):
+    # 训练流程
+    # print(ysc_robot_net.connection1.weight)
+    net.ysc_pre_train_pipeline(load=False)
+
+def load_and_test(net:YscNet):
+    net.load_weight_and_buffer(model_path="save_600/real_ysc_model_mic", buffer_path= 'real_ysc_buffer_600_mic.pth') # 使用 200 轮测试
+    net.ysc_load_and_test_pipeline() # 测试数据
+
+
+"""
+    groups = {
+        'ANGRY':    [[2],[9] [12]],
+        'NEGATIVE': [[1], [4,5], [6],[13,14,15]], # 这里的一个很大的假设就是,如果一起训练可以消极, 那么单个的输入给进来的时候,希望也是消极的!!!!!!
+        'POSITIVE': [[0], [3], [7], [8],[10,11]],
+        }
+"""
+def single_test(net:YscNet):
+    # 这里应该是 有一个 之前没有的输入进来， 怎么处理一下， 或者就是 红色 + 抚摸
+    net.load_weight_and_buffer(model_path="save_600/real_ysc_model_mic", buffer_path="real_ysc_buffer_600_mic.pth") # 加载200的与训练数据
+    print(net.assign_label)
+    t = 1
+    while t < 100:
+        t+=1
+        result_list = [0.0] * input_node_num_origin
+        for i in range(input_node_num_origin):
+            if i == 1 or i == 4: # 这里对比一下 14 和 014 的区别 0 是抚摸 14对应的脉冲是: 12 28 60 76；  0 对应的是 5
+                result_list[i] = 1.0
+            else:
+                result_list[i] = random.uniform(0, 0.2)
+        result_list = result_list * input_num_mul_index
+        # print(result_list)
+        temp_input = torch.tensor(result_list , device=device).unsqueeze(0) # 增加了一个维度
+        temp_output = net.step(data=temp_input, reward=1) 
+
+        temp_predict = net.just_predict_with_no_assign_label_update(output=temp_output)
+        real_label = net.new_check_label_from_data(temp_input)
+
+        print(temp_output)
+        # print(net.buffer[1][-1])
+        ##### 这里 ##### 判断是否抚摸
+        if result_list[0] == 1:
+            net.influence_all_buffer(interact=0, temp_output=temp_output)
+        print("0: ", torch.nonzero(net.assign_label == 0, as_tuple=True))
+        print("1: ", torch.nonzero(net.assign_label == 1, as_tuple=True))
+        print("2: ", torch.nonzero(net.assign_label == 2, as_tuple=True))
+        
+        
+        net.plot_spike_and_valt()
+        print(temp_predict, real_label)
 
 
     
@@ -552,6 +577,14 @@ def mic_change(net:YscNet):
     net.emotion_core_mic_change() # 连续微调，看什么时候能反转过来
 
 
+def compare_with_darwin_just_forward(net:YscNet):
+    
+
+    temp_data = torch.tensor([[1 if i==1 or i == 4 else 0.01 for i in range(16)] * 16]).to(device=device)
+    ans = net.step(data=temp_data)
+    return ans
+    # print(ans)
+
 
 if __name__ == "__main__":
     
@@ -561,13 +594,18 @@ if __name__ == "__main__":
 
     ysc_robot_net = YscNet()
     ysc_robot_net.reward(1) # 这里不加上总会出问题
-    # ysc_robot_net.build()
+    ysc_robot_net.build()
     # train(ysc_robot_net)
     # print(ysc_robot_net.connection1.weight)
     # load_and_test(ysc_robot_net)
     single_test(ysc_robot_net)
     # mic_change(ysc_robot_net)
-
+    # ysc_robot_net.load_weight_and_buffer(model_path="save_600/real_ysc_model_mic", buffer_path= 'real_ysc_buffer_600_mic.pth') # 使用 200 轮测试
+    
+    # t = time.perf_counter()
+    # for  _ in tqdm(range(150)):
+        # compare_with_darwin_just_forward(ysc_robot_net)
+    # print(time.perf_counter() - t)
     
 
     # ysc_robot_net.ysc_test_pretrain()

@@ -508,7 +508,7 @@ class StateMonitor(Monitor):
         figsize = kwargs.get('figsize', (5, 5))
         cmap = kwargs.get('camp', 'hot_r')
         wmin = kwargs.get('wmin', 0)
-        wmax = kwargs.get('wmax', 128)
+        wmax = kwargs.get('wmax', 0.6)
         im = kwargs.get('im', None)
 
         if batch_id == None:
